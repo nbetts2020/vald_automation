@@ -7,15 +7,13 @@ import logging
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
 
-populate_folder_path = os.getenv("VALD_FOLDER_PATH")
-
 def main():
 
     logging.info('Starting...')
     
     vald = Vald()
     logging.info("Vald initialized")
-    vald.populate_folders(populate_folder_path, None)
+    vald.populate_folders()
     logging.info("Vald first populate")
 
     while True:
@@ -26,7 +24,7 @@ def main():
             logging.info(f"{minutes}m{seconds}s remaining")
             time.sleep(30)
             countdown -= 30
-        vald.populate_folders(populate_folder_path, None)
+        vald.populate_folders()
 
 if __name__ == "__main__":
     main()

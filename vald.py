@@ -26,6 +26,7 @@ class Vald():
         self.profiles_api_url = os.getenv("PROFILES_API_URL")
 
         self.vald_master_file_path = os.getenv("VALD_MASTER_FILE_PATH")
+        self.base_directory = os.getenv("VALD_FOLDER_PATH")
     
     def get_last_update(self, csv_file_path):
         df = pd.read_csv(csv_file_path)
@@ -61,6 +62,7 @@ class Vald():
         return response.json() if response.status_code == 200 else None
     
     def get_tests(self, date_range):
+        print(date_range, "date_range")
         access_token = self.get_access_token()
         if not access_token:
             print("Failed to retrieve access token")
@@ -68,6 +70,7 @@ class Vald():
 
         headers = {'Authorization': f'Bearer {access_token}', 'Accept': '*/*'}
         api_url = f"{self.forceframes_api_url}?TenantId={self.tenant_id}&ModifiedFromUtc={self.modified_from_utc}&TestFromUtc={date_range[0]}&TestToUtc={date_range[1]}"
+
         tests_data = self.fetch_data(api_url, headers)
         if tests_data is None:
             return pd.DataFrame()
@@ -78,13 +81,18 @@ class Vald():
         with ThreadPoolExecutor(max_workers=10) as executor:
             futures = [executor.submit(self.fetch_data, f"{self.profiles_api_url}{test['athleteId']}?TenantId={self.tenant_id}", headers) for test in tests_data['tests']]
             for test, future in zip(tests_data['tests'], futures):
-                result = future.result()
-                if result is not None:
-                    test['Name'] = result['givenName'].strip() + " " + result['familyName'].strip()
-                    group_ids = result['groupIds']
-                    group_names = [id_to_name.get(g_id, "ID not found") for g_id in group_ids]
-                    test['Groups'] = '|'.join(group_names)
-                else:
+                try:
+                    result = future.result()
+                    if result is not None:
+                        test['Name'] = result['givenName'].strip() + " " + result['familyName'].strip()
+                        group_ids = result['groupIds']
+                        group_names = [id_to_name.get(g_id, "ID not found") for g_id in group_ids]
+                        test['Groups'] = '|'.join(group_names)
+                    else:
+                        continue
+                        #return pd.DataFrame()
+                except Exception as e:
+                    print(f"An error occurred while processing test with athleteId {test['athleteId']}: {e}")
                     return pd.DataFrame()
 
         print("Data retrieval complete.")
@@ -143,7 +151,6 @@ class Vald():
         return utc_intervals
 
     def split_date_range_utc(self, start_str, end_str, fraction):
-        print(start_str, type(start_str), end_str, "tuple error")
 
         start = urllib.parse.unquote(start_str)
         start = datetime.fromisoformat(start.replace('Z', '+00:00'))
@@ -152,19 +159,23 @@ class Vald():
         end = datetime.fromisoformat(end.replace('Z', '+00:00'))
 
         total_duration = (end - start).total_seconds()
-
         interval_duration = total_duration * fraction
 
         intervals = []
         current_start = start
+
         while current_start < end:
             current_end = current_start + timedelta(seconds=interval_duration)
             if current_end > end:
                 current_end = end
+
+            start_iso = current_start.strftime('%Y-%m-%dT%H:%M:%SZ')
+            end_iso = current_end.strftime('%Y-%m-%dT%H:%M:%SZ')
+
             intervals.append(
                 (
-                    urllib.parse.quote(current_start.isoformat().replace('+00:00', 'Z')),
-                    urllib.parse.quote(current_end.isoformat().replace('+00:00', 'Z'))
+                    urllib.parse.quote(start_iso),
+                    urllib.parse.quote(end_iso)
                 )
             )
             current_start = current_end
@@ -211,13 +222,15 @@ class Vald():
             data.loc[i+1, 'Impulse Imbalance (%)'] = (data.loc[i+1, 'L Max Impulse (Ns)'] - data.loc[i+1, 'R Max Impulse (Ns)']) / max(data.loc[i+1, 'L Max Impulse (Ns)'], data.loc[i+1, 'R Max Impulse (Ns)'])
         return data
     
-    def fetch_data_recursively(self, start_date, end_date, granularity=0.5):
+    def fetch_data_recursively(self, start_date, end_date, granularity=1):
         intervals = self.split_date_range_utc(start_date, end_date, granularity)
         all_data = pd.DataFrame()
+        print(intervals, "intervals")
         
         for start, end in intervals:
-            data = self.get_tests((start, end))
-            print(start, len(data))
+            data = self.get_tests((start.replace("%3A", ":"), end.replace("%3A", ":")))
+            print(data, len(data), "appapap")
+            print(start.replace("%3A", ":"), end.replace("%3A", ":"), len(data))
             if len(data) >= 50:
                 smaller_data = self.fetch_data_recursively(start, end, granularity / 2)
                 all_data = pd.concat([all_data, smaller_data])
@@ -235,9 +248,9 @@ class Vald():
         df = self.change_format(df)
         return df
     
-    def update_forceframe(self, last_update):
-        if last_update is None:
-            last_update, last_index = self.get_last_update(self.vald_master_file_path)
+    def update_forceframe(self):
+
+        last_update, last_index = self.get_last_update(self.vald_master_file_path)
 
         current_time = datetime.utcnow()
         future_time = current_time + timedelta(minutes=10)
@@ -268,7 +281,7 @@ class Vald():
         
         print(f"Updated {self.vald_master_file_path}")
 
-    def save_dataframes(self, teams_data, base_directory):
+    def save_dataframes(self, teams_data):
         today_date = datetime.today().strftime('%Y-%m-%d')
         
         for team_name, test_data in teams_data.items():
@@ -277,7 +290,7 @@ class Vald():
             
             sanitized_team_name = self.sanitize_foldername(team_name.lower())
             
-            team_folder = os.path.join(base_directory, sanitized_team_name)
+            team_folder = os.path.join(self.base_directory, sanitized_team_name)
             if not os.path.exists(team_folder):
                 os.makedirs(team_folder)
             
@@ -300,21 +313,79 @@ class Vald():
                 df.to_csv(new_file_path, index=False)
                 print(f"Saved {new_file_path}")
 
-    def populate_folders(self, base_directory, last_update):
-        new_data = self.update_forceframe(last_update)
-        if new_data is None:
-            return None
-        self.update_master_file(new_data)
+    def save_master_file(self, data):
+        directory = os.path.dirname(self.vald_master_file_path)
+        if not os.path.exists(directory):
+            os.makedirs(directory)
+
+        data.to_csv(self.vald_master_file_path, index=True)
+
+    def initial_setup(self):
+        current_datetime = datetime.utcnow()
+
+        if current_datetime < datetime(current_datetime.year, 8, 1): # start of athletic year - August 1
+            year_for_august = current_datetime.year - 1
+        else:
+            year_for_august = current_datetime.year
+
+        august_first_datetime = datetime(year_for_august, 8, 1)
+
+        diff_in_months = (current_datetime.year - august_first_datetime.year) * 12 + current_datetime.month - august_first_datetime.month
+
+        if abs(diff_in_months) > 6: # vald api cannot accept requests more than 6 months apart
+
+            split_date = august_first_datetime + timedelta(days=180)
+            split_date_formatted = split_date.strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
+            
+            august_first_formatted = august_first_datetime.strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
+            one_hour_later_formatted = (current_datetime + timedelta(hours=1)).strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
+
+            formatted_dates_first = [august_first_formatted, split_date_formatted]
+            formatted_dates_second = [split_date + timedelta(seconds=1), current_datetime]
+
+            formatted_dates_second = [date.strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z' if isinstance(date, datetime) else date for date in formatted_dates_second]
+
+            print(formatted_dates_first, formatted_dates_second, "formatted_dates")
+
+            data_first = self.get_data(formatted_dates_first)
+            data_second = self.get_data(formatted_dates_second)
+            
+            data = pd.concat([data_first, data_second], ignore_index=True)
+        else:
+            august_first_formatted = august_first_datetime.strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
+            one_hour_later_formatted = (current_datetime + timedelta(hours=1)).strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
+
+            formatted_dates = [august_first_formatted, one_hour_later_formatted]
+
+            data = self.get_data(formatted_dates)
+
+        self.save_master_file(data)
+
+        teams_data = self.data_to_groups(data)
+
+        self.save_dataframes(teams_data)
+
+    def data_to_groups(self, data):
         teams_data = {}
 
-        for group in new_data['Groups'].unique():
+        for group in data['Groups'].unique():
             teams_data[group] = {}
-            group_data = new_data[new_data['Groups'] == group]
+            group_data = data[data['Groups'] == group]
             
             for test in group_data['Test'].unique():
                 test_data = group_data[group_data['Test'] == test].reset_index(drop=True)
                 teams_data[group][test] = test_data
 
-        self.save_dataframes(teams_data, base_directory)
+        return teams_data
 
+    def populate_folders(self):
+        if os.path.exists(self.vald_master_file_path) == False:
+            print("Setting up intial")
+            self.initial_setup()
+        new_data = self.update_forceframe()
+        if new_data is None:
+            return None
+        self.update_master_file(new_data)
+        teams_data = self.data_to_groups(new_data)
 
+        self.save_dataframes(teams_data)
